@@ -15,38 +15,92 @@ implementations with production‑grade logic (OAuth flows, retry policies, etc.
 pipeline.
 """
 
-# Added for concurrency and retries
+# Core workflow functions have been moved to dedicated modules (config, downloader, extractor, r2_client, verifier, splitter, amazon_photos, youtube_uploader).
+# This file now only contains the CLI entry point and imports.
+
 import concurrent.futures
 import time
 from functools import wraps
 
-def retry(attempts: int = 3, backoff: float = 1.0, allowed_exceptions: tuple = (Exception,)):
-    """Simple retry decorator with exponential backoff.
-
-    Usage:
-        @retry(attempts=5, backoff=2)
-        def fragile_operation(...):
-            ...
-    """
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            delay = backoff
-            for attempt in range(1, attempts + 1):
-                try:
-                    return func(*args, **kwargs)
-                except allowed_exceptions as e:
-                    if attempt == attempts:
-                        raise
-                    logging.warning("Attempt %d/%d failed for %s: %s. Retrying in %.1fs...",
-                                    attempt, attempts, func.__name__, e, delay)
-                    time.sleep(delay)
-                    delay *= 2
-        return wrapper
-    return decorator
+# Retry logic moved to utils.retry – imported where needed
 
 
-# Added for YouTube upload
+
+# Module imports (functionality split into separate files)
+from config import load_config
+from downloader import download_takeout
+from extractor import extract_archive
+from r2_client import get_r2_client, upload_all_to_r2
+from verifier import verify_upload_strict
+from splitter import split_media
+from amazon_photos import upload_to_amazon_photos
+from youtube_uploader import upload_to_youtube
+
+import argparse
+import json
+import logging
+import os
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+from typing import List, Tuple
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Google Takeout → R2 → Amazon Photos / YouTube bridge")
+    parser.add_argument("--url", required=True, help="Direct download URL for the Google Takeout archive (Google Photos export)")
+    parser.add_argument("--config", default="config.json", help="Path to JSON configuration file (default: config.json)")
+    parser.add_argument("--temp-dir", default=None, help="Optional directory for temporary files")
+    parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, …)")
+    parser.add_argument("--log-file", default=None, help="Optional path to a log file (with rotation)")
+    parser.add_argument("--manifest", action="store_true", help="Generate a JSON manifest of uploaded files")
+    args = parser.parse_args()
+
+    from logging_config import setup_logging
+    setup_logging(level=args.log_level, log_file=args.log_file)
+
+    config = load_config(Path(args.config))
+    temp_root = Path(args.temp_dir) if args.temp_dir else Path(tempfile.mkdtemp(prefix="takeout_bridge_"))
+    temp_root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # 1. Download
+        archive_path = download_takeout(args.url, temp_root)
+        # 2. Extract
+        extract_dir = temp_root / "extracted"
+        extract_dir.mkdir()
+        extracted_files = extract_archive(archive_path, extract_dir)
+        # 3. Upload to R2 (concurrent)
+        uploaded = upload_all_to_r2(config["r2"], extracted_files)
+        # 4. Strict verification (MD5)
+        bucket = get_r2_client(config["r2"])
+        all_ok, mismatches = verify_upload_strict(bucket, uploaded)
+        if not all_ok:
+            for local_path, key, reason in mismatches:
+                logging.error("Verification failed for %s (key=%s): %s", local_path, key, reason)
+            sys.exit(1)
+        logging.info("All files verified successfully in R2")
+        # Optional manifest generation
+        if args.manifest:
+            manifest_path = temp_root / "upload_manifest.json"
+            manifest_data = [{"local_path": str(p), "r2_key": k} for p, k in uploaded]
+            manifest_path.write_text(json.dumps(manifest_data, indent=2))
+            logging.info("Manifest written to %s", manifest_path)
+        # 5. Split
+        images, videos = split_media([p for p, _ in uploaded])
+        # 6. Amazon Photos (concurrent placeholder)
+        upload_to_amazon_photos(images, config.get("amazon_photos", {}).get("access_token", ""), config.get("amazon_photos", {}).get("upload_endpoint", ""))
+        # 7. YouTube (real implementation)
+        upload_to_youtube(videos, config["youtube"])
+    finally:
+        if not args.temp_dir:
+            shutil.rmtree(temp_root, ignore_errors=True)
+            logging.debug("Removed temporary directory %s", temp_root)
+
+if __name__ == "__main__":
+    main()
+
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 
@@ -391,10 +445,12 @@ def main():
     parser.add_argument("--config", default="config.json", help="Path to JSON configuration file (default: config.json)")
     parser.add_argument("--temp-dir", default=None, help="Optional directory for temporary files")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, …)")
+    parser.add_argument("--log-file", default=None, help="Optional path to a log file (with rotation)")
     parser.add_argument("--manifest", action="store_true", help="Generate a JSON manifest of uploaded files")
     args = parser.parse_args()
 
-    logging.basicConfig(level=getattr(logging, args.log_level.upper()), format="[%(levelname)s] %(message)s")
+    from logging_config import setup_logging
+    setup_logging(level=args.log_level, log_file=args.log_file)
 
     config = load_config(Path(args.config))
     temp_root = Path(args.temp_dir) if args.temp_dir else Path(tempfile.mkdtemp(prefix="takeout_bridge_"))
