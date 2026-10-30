@@ -1,0 +1,8 @@
+boto3
+google-auth-oauthlib
+google-api-python-client
+tqdm
+requests
+jsonschema
+pytest
+pytest-mock
