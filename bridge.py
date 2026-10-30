@@ -392,6 +392,7 @@ def main():
     parser.add_argument("--temp-dir", default=None, help="Optional directory for temporary files")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, …)")
     parser.add_argument("--manifest", action="store_true", help="Generate a JSON manifest of uploaded files")
+    parser.add_argument("--error-report", default=None, help="Path to write a JSON error report of failed files")
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper()), format="[%(levelname)s] %(message)s")
@@ -415,8 +416,23 @@ def main():
         if not all_ok:
             for local_path, key, reason in mismatches:
                 logging.error("Verification failed for %s (key=%s): %s", local_path, key, reason)
-            sys.exit(1)
         logging.info("All files verified successfully in R2")
+        # Collect failures for error report
+        failures = []
+        if not all_ok:
+            for local_path, key, reason in mismatches:
+                failures.append({
+                    "local_path": str(local_path),
+                    "r2_key": key,
+                    "reason": reason,
+                    "stage": "verification",
+                })
+        if args.error_report and failures:
+            report_path = Path(args.error_report)
+            report_path.write_text(json.dumps({"failures": failures}, indent=2))
+            logging.info("Error report written to %s (%d failures)", report_path, len(failures))
+        if failures:
+            sys.exit(1)
         # Optional manifest generation
         if args.manifest:
             manifest_path = temp_root / "upload_manifest.json"
