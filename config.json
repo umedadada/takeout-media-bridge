@@ -1,0 +1,15 @@
+{
+  "r2": {
+    "endpoint_url": "https://<account_id>.r2.cloudflarestorage.com",
+    "access_key_id": "<R2_ACCESS_KEY_ID>",
+    "secret_access_key": "<R2_SECRET_ACCESS_KEY>",
+    "bucket": "takeout-archive"
+  },
+  "youtube": {
+    "client_secrets_file": "client_secret.json",
+    "credentials_file": "youtube_credentials.json"
+  },
+  "amazon_photos": {
+    "access_token": "<AMAZON_PHOTOS_OAUTH_TOKEN>"
+  }
+}
