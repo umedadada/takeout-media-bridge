@@ -6,7 +6,16 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from r2_client import get_r2_client, upload_to_r2, upload_all_to_r2, object_exists, _TRANSFER_CONFIG
+from r2_client import (
+    get_r2_client,
+    upload_to_r2,
+    upload_all_to_r2,
+    list_r2_keys,
+    download_from_r2,
+    download_all_from_r2,
+    object_exists,
+    _TRANSFER_CONFIG,
+)
 
 
 class TestGetR2Client:
@@ -99,3 +108,32 @@ class TestObjectExists:
         mock_bucket.Object.return_value.load.side_effect = Exception("Not Found")
 
         assert object_exists(mock_bucket, "missing/key") is False
+
+
+class TestDownloadFromR2:
+    def test_list_r2_keys(self):
+        cfg = {
+            "endpoint_url": "https://test.r2.cloudflarestorage.com",
+            "access_key_id": "key",
+            "secret_access_key": "secret",
+            "bucket": "test-bucket",
+        }
+        obj1 = MagicMock(key="takeout/photo.jpg")
+        obj2 = MagicMock(key="takeout/video.mp4")
+        obj_dir = MagicMock(key="takeout/")
+        mock_bucket = MagicMock()
+        mock_bucket.objects.filter.return_value = [obj1, obj2, obj_dir]
+
+        with patch("r2_client.get_r2_client", return_value=mock_bucket):
+            keys = list_r2_keys(cfg, prefix="takeout/")
+
+        assert keys == ["takeout/photo.jpg", "takeout/video.mp4"]
+
+    def test_download_from_r2(self, tmp_path):
+        mock_bucket = MagicMock()
+        dest = download_from_r2(mock_bucket, "takeout/photo.jpg", tmp_path)
+
+        assert dest == tmp_path / "photo.jpg"
+        mock_bucket.download_file.assert_called_once_with(
+            "takeout/photo.jpg", str(tmp_path / "photo.jpg"), Config=_TRANSFER_CONFIG
+        )

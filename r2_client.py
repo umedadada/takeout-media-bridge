@@ -1,7 +1,8 @@
 """R2 client utilities.
 
 Provides functions to obtain a bucket resource, upload files (with retry),
-upload a list of files concurrently, and check object existence.
+upload a list of files concurrently, list/download objects from R2, and check
+object existence.
 """
 
 import logging
@@ -65,6 +66,57 @@ def upload_all_to_r2(r2_cfg: dict, files: List[Path]) -> List[Tuple[Path, str]]:
                     pbar.update(1)
     logging.info("Uploaded %d files to R2 (concurrent)", len(uploaded))
     return uploaded
+
+
+def list_r2_keys(r2_cfg: dict, prefix: str = "takeout/") -> List[str]:
+    """List all object keys in R2 under the given prefix."""
+    bucket = get_r2_client(r2_cfg)
+    keys = [
+        obj.key
+        for obj in bucket.objects.filter(Prefix=prefix)
+        if not obj.key.endswith("/")
+    ]
+    logging.info("Found %d objects in R2 under prefix '%s'", len(keys), prefix)
+    return keys
+
+
+@retry(attempts=3, backoff=2)
+def download_from_r2(bucket, key: str, dest_dir: Path) -> Path:
+    """Download a single object from R2 into *dest_dir* and return its local path."""
+    filename = Path(key).name
+    local_path = dest_dir / filename
+    local_path.parent.mkdir(parents=True, exist_ok=True)
+    logging.debug("Downloading %s from R2 to %s", key, local_path)
+    bucket.download_file(key, str(local_path), Config=_TRANSFER_CONFIG)
+    return local_path
+
+
+def download_all_from_r2(
+    r2_cfg: dict, dest_dir: Path, prefix: str = "takeout/"
+) -> List[Path]:
+    """Download all objects under *prefix* from R2 concurrently."""
+    bucket = get_r2_client(r2_cfg)
+    keys = list_r2_keys(r2_cfg, prefix=prefix)
+    downloaded: List[Path] = []
+    if not keys:
+        return downloaded
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        future_to_key = {
+            executor.submit(download_from_r2, bucket, k, dest_dir): k for k in keys
+        }
+        with tqdm(total=len(keys), desc="Downloading from R2", unit="file") as pbar:
+            for future in concurrent.futures.as_completed(future_to_key):
+                k = future_to_key[future]
+                try:
+                    path = future.result()
+                    downloaded.append(path)
+                except Exception as exc:
+                    logging.error("Failed to download %s from R2: %s", k, exc)
+                finally:
+                    pbar.update(1)
+    logging.info("Downloaded %d files from R2", len(downloaded))
+    return downloaded
 
 
 def object_exists(bucket, key: str) -> bool:

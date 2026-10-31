@@ -82,6 +82,7 @@ def load_config(config_path: Path) -> dict:
         "amazon_photos": {
             "access_token": os.getenv("AMAZON_PHOTOS_TOKEN"),
             "upload_endpoint": os.getenv("AMAZON_PHOTOS_ENDPOINT"),
+            "sync_dir": os.getenv("AMAZON_PHOTOS_SYNC_DIR"),
         },
     }
     for section, values in env_map.items():

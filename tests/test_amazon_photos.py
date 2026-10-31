@@ -32,6 +32,15 @@ class TestUploadToAmazonPhotos:
         with patch("amazon_photos.requests.post", return_value=mock_response):
             upload_to_amazon_photos([img], token="tok", endpoint="http://example.com/upload")
 
+    def test_stages_to_sync_dir(self, tmp_path):
+        img = tmp_path / "img.jpg"
+        img.write_bytes(b"fake image")
+        sync_dir = tmp_path / "sync_folder"
+
+        upload_to_amazon_photos([img], sync_dir=str(sync_dir))
+
+        assert (sync_dir / "img.jpg").read_bytes() == b"fake image"
+
 
 class TestUploadOne:
     def test_success(self, tmp_path):

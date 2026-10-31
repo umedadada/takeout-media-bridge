@@ -1,14 +1,17 @@
 """Amazon Photos upload utilities.
 
-Provides `upload_to_amazon_photos` which uploads a list of image files to
-Amazon Photos using a provided OAuth2 Bearer token and upload endpoint.
-The function runs uploads concurrently and retries transient errors.
+Provides `upload_to_amazon_photos` which either:
+1. Copies/moves images to a local directory monitored by the official
+   Amazon Photos desktop app (when ``sync_dir`` is provided), or
+2. Uploads a list of image files to an HTTP endpoint using a provided
+   OAuth2 Bearer token.
 """
 
 import logging
+import shutil
 import requests
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from tqdm import tqdm
 
@@ -33,13 +36,40 @@ def _upload_one(image_path: Path, token: str, endpoint: str) -> bool:
         return False
 
 
-def upload_to_amazon_photos(image_files: List[Path], token: str, endpoint: str) -> None:
-    """Upload multiple images to Amazon Photos.
+def upload_to_amazon_photos(
+    image_files: List[Path],
+    token: str = "",
+    endpoint: str = "",
+    sync_dir: Optional[str] = None,
+) -> None:
+    """Upload or stage multiple images for Amazon Photos.
 
     * ``image_files`` – list of image ``Path`` objects.
-    * ``token`` – OAuth2 Bearer token.
-    * ``endpoint`` – upload URL (e.g. ``https://photos.amazon.com/api/v1/uploads``).
+    * ``token`` – OAuth2 Bearer token (for HTTP upload mode).
+    * ``endpoint`` – upload URL (for HTTP upload mode).
+    * ``sync_dir`` – local directory path monitored by the Amazon Photos
+      desktop app. When set, images are copied to this folder instead of
+      using the HTTP endpoint.
     """
+    if sync_dir:
+        target_dir = Path(sync_dir).expanduser().resolve()
+        target_dir.mkdir(parents=True, exist_ok=True)
+        total = len(image_files)
+        copied = 0
+        with tqdm(total=total, desc="Staging for Amazon Photos", unit="file") as pbar:
+            for img in image_files:
+                dest = target_dir / img.name
+                shutil.copy2(img, dest)
+                copied += 1
+                pbar.update(1)
+        logging.info(
+            "Staged %d/%d images into Amazon Photos sync folder: %s",
+            copied,
+            total,
+            target_dir,
+        )
+        return
+
     if not token:
         logging.warning("Amazon Photos token not provided – skipping upload.")
         return

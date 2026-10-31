@@ -2,14 +2,15 @@
 """takeout-media-bridge
 
 Automates migrating Google Photos (via Google Takeout export archive) to
-Cloudflare R2, Amazon Photos, and YouTube:
-1. Receive a Google Takeout export URL for Google Photos.
-2. Download the archive and extract its contents.
-3. Upload all files to a Cloudflare R2 bucket (S3-compatible).
-4. Strictly verify that every file was uploaded with matching MD5 checksum.
-5. Split the payload into images and videos.
-6. Upload images to Amazon Photos.
-7. Upload videos to YouTube via the Data API v3.
+Cloudflare R2, Amazon Photos, and YouTube.
+
+Supports two-phase execution:
+- Phase 1 (Takeout -> R2 only):
+    python bridge.py --url "<TAKEOUT_URL>" --r2-only
+- Phase 2 (R2 -> Amazon Photos / YouTube):
+    python bridge.py --from-r2
+- Full pipeline in one run:
+    python bridge.py --url "<TAKEOUT_URL>"
 """
 
 import argparse
@@ -25,7 +26,7 @@ from config import load_config
 from downloader import download_takeout
 from extractor import extract_archive
 from logging_config import setup_logging
-from r2_client import get_r2_client, upload_all_to_r2
+from r2_client import download_all_from_r2, get_r2_client, upload_all_to_r2
 from splitter import split_media
 from verifier import verify_upload_strict
 from youtube_uploader import upload_to_youtube
@@ -37,8 +38,34 @@ def main() -> None:
     )
     parser.add_argument(
         "--url",
-        required=True,
-        help="Direct download URL for the Google Takeout archive (Google Photos export)",
+        required=False,
+        default=None,
+        help="Direct download URL for the Google Takeout archive (required unless --from-r2 is set)",
+    )
+    parser.add_argument(
+        "--r2-only",
+        action="store_true",
+        help="Phase 1 mode: Download Takeout, upload to R2, verify MD5, and exit (skip Amazon Photos & YouTube)",
+    )
+    parser.add_argument(
+        "--from-r2",
+        action="store_true",
+        help="Phase 2 mode: Fetch already-uploaded media from R2 and process for Amazon Photos / YouTube",
+    )
+    parser.add_argument(
+        "--r2-prefix",
+        default="takeout/",
+        help="R2 key prefix to use when uploading or fetching with --from-r2 (default: takeout/)",
+    )
+    parser.add_argument(
+        "--amazon-sync-dir",
+        default=None,
+        help="Local folder path monitored by Amazon Photos desktop app (stages images here)",
+    )
+    parser.add_argument(
+        "--skip-youtube",
+        action="store_true",
+        help="Skip YouTube video upload",
     )
     parser.add_argument(
         "--config",
@@ -72,6 +99,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    if not args.from_r2 and not args.url:
+        parser.error("--url is required unless --from-r2 is specified.")
+
     setup_logging(level=args.log_level, log_file=args.log_file)
 
     config = load_config(Path(args.config))
@@ -83,74 +113,91 @@ def main() -> None:
     temp_root.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1. Download
-        archive_path = download_takeout(args.url, temp_root)
-
-        # 2. Extract
-        extract_dir = temp_root / "extracted"
-        extract_dir.mkdir(exist_ok=True)
-        extracted_files = extract_archive(archive_path, extract_dir)
-
-        # 3. Upload to R2 (concurrent)
-        uploaded = upload_all_to_r2(config["r2"], extracted_files)
-
-        # 4. Strict verification (MD5)
-        bucket = get_r2_client(config["r2"])
-        all_ok, mismatches = verify_upload_strict(bucket, uploaded)
-        failures = []
-        if not all_ok:
-            for local_path, key, reason in mismatches:
-                logging.error(
-                    "Verification failed for %s (key=%s): %s",
-                    local_path,
-                    key,
-                    reason,
-                )
-                failures.append(
-                    {
-                        "local_path": str(local_path),
-                        "r2_key": key,
-                        "reason": reason,
-                        "stage": "verification",
-                    }
-                )
-
-        if args.error_report and failures:
-            report_path = Path(args.error_report)
-            report_path.write_text(json.dumps({"failures": failures}, indent=2))
-            logging.info(
-                "Error report written to %s (%d failures)",
-                report_path,
-                len(failures),
+        if args.from_r2:
+            # Phase 2: Download files from R2 to local temp dir
+            r2_download_dir = temp_root / "from_r2"
+            r2_download_dir.mkdir(exist_ok=True)
+            media_files = download_all_from_r2(
+                config["r2"], r2_download_dir, prefix=args.r2_prefix
             )
+        else:
+            # Phase 1: Download Takeout -> Extract -> Upload to R2 -> Verify
+            archive_path = download_takeout(args.url, temp_root)
 
-        if failures:
-            sys.exit(1)
+            extract_dir = temp_root / "extracted"
+            extract_dir.mkdir(exist_ok=True)
+            extracted_files = extract_archive(archive_path, extract_dir)
 
-        logging.info("All files verified successfully in R2")
+            uploaded = upload_all_to_r2(config["r2"], extracted_files)
 
-        # Optional manifest generation
-        if args.manifest:
-            manifest_path = temp_root / "upload_manifest.json"
-            manifest_data = [
-                {"local_path": str(p), "r2_key": k} for p, k in uploaded
-            ]
-            manifest_path.write_text(json.dumps(manifest_data, indent=2))
-            logging.info("Manifest written to %s", manifest_path)
+            bucket = get_r2_client(config["r2"])
+            all_ok, mismatches = verify_upload_strict(bucket, uploaded)
+            failures = []
+            if not all_ok:
+                for local_path, key, reason in mismatches:
+                    logging.error(
+                        "Verification failed for %s (key=%s): %s",
+                        local_path,
+                        key,
+                        reason,
+                    )
+                    failures.append(
+                        {
+                            "local_path": str(local_path),
+                            "r2_key": key,
+                            "reason": reason,
+                            "stage": "verification",
+                        }
+                    )
 
-        # 5. Split
-        images, videos = split_media([p for p, _ in uploaded])
+            if args.error_report and failures:
+                report_path = Path(args.error_report)
+                report_path.write_text(json.dumps({"failures": failures}, indent=2))
+                logging.info(
+                    "Error report written to %s (%d failures)",
+                    report_path,
+                    len(failures),
+                )
+
+            if failures:
+                sys.exit(1)
+
+            logging.info("All files verified successfully in R2")
+
+            if args.manifest:
+                manifest_path = temp_root / "upload_manifest.json"
+                manifest_data = [
+                    {"local_path": str(p), "r2_key": k} for p, k in uploaded
+                ]
+                manifest_path.write_text(json.dumps(manifest_data, indent=2))
+                logging.info("Manifest written to %s", manifest_path)
+
+            if args.r2_only:
+                logging.info(
+                    "--r2-only specified: R2 upload and verification complete. Skipping Amazon Photos and YouTube."
+                )
+                return
+
+            media_files = [p for p, _ in uploaded]
+
+        # 5. Split into images and videos
+        images, videos = split_media(media_files)
 
         # 6. Amazon Photos
         amazon_cfg = config.get("amazon_photos", {})
+        sync_dir = args.amazon_sync_dir or amazon_cfg.get("sync_dir")
         upload_to_amazon_photos(
             images,
-            amazon_cfg.get("access_token", ""),
-            amazon_cfg.get("upload_endpoint", ""),
+            token=amazon_cfg.get("access_token", ""),
+            endpoint=amazon_cfg.get("upload_endpoint", ""),
+            sync_dir=sync_dir,
         )
 
         # 7. YouTube
-        upload_to_youtube(videos, config["youtube"])
+        if args.skip_youtube:
+            logging.info("--skip-youtube specified: Skipping YouTube upload.")
+        else:
+            upload_to_youtube(videos, config["youtube"])
     finally:
         if not args.temp_dir:
             shutil.rmtree(temp_root, ignore_errors=True)
