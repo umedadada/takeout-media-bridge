@@ -43,7 +43,7 @@ def upload_to_r2(bucket, file_path: Path, key_prefix: str = "") -> str:
     """Upload a single file to R2 and return the object key."""
     key = f"{key_prefix}{file_path.name}" if not key_prefix.endswith('/') else f"{key_prefix}{file_path.name}"
     logging.debug("Uploading %s to R2 as %s", file_path, key)
-    bucket.upload_file(str(file_path), key)
+    bucket.upload_file(str(file_path), key, Config=_TRANSFER_CONFIG)
     return key
 
 
