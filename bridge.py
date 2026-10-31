@@ -4,8 +4,10 @@
 Automates migrating Google Photos (via Google Takeout export archives) to
 Cloudflare R2, Amazon Photos, and YouTube.
 
-Supports multiple Takeout URLs or local archives, and two-phase execution:
-- Phase 1 (Multiple Takeout URLs -> R2 only):
+Supports:
+- Automated Chrome download directly from Takeout archive page:
+    python bridge.py --takeout-page "https://takeout.google.com/manage/archive/..." --r2-only
+- Multiple Takeout URLs or local archives:
     python bridge.py --url "<URL1>" "<URL2>" --r2-only
     python bridge.py --urls-file urls.txt --r2-only
 - Phase 2 (R2 -> Amazon Photos / YouTube):
@@ -19,7 +21,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
-from typing import List, Tuple
+from typing import Iterator, List, Tuple
 
 from amazon_photos import upload_to_amazon_photos
 from config import load_config
@@ -28,6 +30,7 @@ from extractor import extract_archive
 from logging_config import setup_logging
 from r2_client import download_all_from_r2, get_r2_client, upload_all_to_r2
 from splitter import split_media
+from takeout_browser import iter_takeout_page_downloads
 from verifier import verify_upload_strict
 from youtube_uploader import upload_to_youtube
 
@@ -49,9 +52,56 @@ def _collect_urls(args: argparse.Namespace) -> List[str]:
     return urls
 
 
+def _iter_archives(
+    args: argparse.Namespace,
+    urls: List[str],
+    local_archives: List[Path],
+    temp_root: Path,
+) -> Iterator[Tuple[int, str, Path, Path]]:
+    """Yield (batch_index, source_label, batch_dir, archive_path) for each archive."""
+    idx = 0
+    if args.takeout_page:
+        browser_dl_dir = temp_root / "browser_downloads"
+        for dl_path in iter_takeout_page_downloads(
+            page_url=args.takeout_page,
+            download_dir=browser_dl_dir,
+            cdp_url=args.chrome_cdp,
+        ):
+            idx += 1
+            batch_dir = temp_root / f"batch_{idx:03d}"
+            batch_dir.mkdir(parents=True, exist_ok=True)
+            # Move downloaded archive into batch_dir so batch cleanup removes it too
+            target_archive = batch_dir / dl_path.name
+            shutil.move(str(dl_path), str(target_archive))
+            yield idx, f"takeout-page:{target_archive.name}", batch_dir, target_archive
+
+    for u in urls:
+        idx += 1
+        batch_dir = temp_root / f"batch_{idx:03d}"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = download_takeout(u, batch_dir)
+        yield idx, u, batch_dir, archive_path
+
+    for a in local_archives:
+        idx += 1
+        batch_dir = temp_root / f"batch_{idx:03d}"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        yield idx, str(a), batch_dir, a
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Google Takeout → R2 → Amazon Photos / YouTube bridge"
+    )
+    parser.add_argument(
+        "--takeout-page",
+        default=None,
+        help="Google Takeout archive management URL (https://takeout.google.com/manage/archive/...) to auto-download via Chrome",
+    )
+    parser.add_argument(
+        "--chrome-cdp",
+        default=None,
+        help="Optional Chrome DevTools Protocol URL (e.g. http://127.0.0.1:9222) to reuse an already-open Chrome",
     )
     parser.add_argument(
         "--url",
@@ -131,9 +181,9 @@ def main() -> None:
     urls = _collect_urls(args)
     local_archives = [Path(p).expanduser().resolve() for p in (args.archive or [])]
 
-    if not args.from_r2 and not urls and not local_archives:
+    if not args.from_r2 and not args.takeout_page and not urls and not local_archives:
         parser.error(
-            "Specify at least one --url, --urls-file, --archive, or use --from-r2."
+            "Specify --takeout-page, --url, --urls-file, --archive, or use --from-r2."
         )
 
     setup_logging(level=args.log_level, log_file=args.log_file)
@@ -155,32 +205,22 @@ def main() -> None:
                 config["r2"], r2_download_dir, prefix=args.r2_prefix
             )
         else:
-            # Phase 1: Process each URL and/or local archive one by one
+            # Phase 1: Process each archive one by one
             all_uploaded: List[Tuple[Path, str]] = []
             failures = []
             bucket = get_r2_client(config["r2"])
+            processed_batches = 0
 
-            total_sources = len(urls) + len(local_archives)
-            source_items = [("url", u) for u in urls] + [
-                ("archive", str(a)) for a in local_archives
-            ]
-
-            for idx, (src_type, src_val) in enumerate(source_items, start=1):
+            for idx, src_label, batch_dir, archive_path in _iter_archives(
+                args, urls, local_archives, temp_root
+            ):
+                processed_batches += 1
                 logging.info(
-                    "=== Processing archive %d/%d (%s) ===",
+                    "=== Processing archive #%d (%s) ===",
                     idx,
-                    total_sources,
-                    src_type,
+                    src_label,
                 )
-                batch_dir = temp_root / f"batch_{idx:03d}"
-                batch_dir.mkdir(parents=True, exist_ok=True)
-
                 try:
-                    if src_type == "url":
-                        archive_path = download_takeout(src_val, batch_dir)
-                    else:
-                        archive_path = Path(src_val)
-
                     extract_dir = batch_dir / "extracted"
                     extract_dir.mkdir(exist_ok=True)
                     extracted_files = extract_archive(archive_path, extract_dir)
@@ -213,28 +253,25 @@ def main() -> None:
                     all_uploaded.extend(uploaded)
                 except Exception as exc:
                     logging.error(
-                        "Failed processing archive %d/%d (%s): %s",
+                        "Failed processing archive #%d (%s): %s",
                         idx,
-                        total_sources,
-                        src_val,
+                        src_label,
                         exc,
                     )
                     failures.append(
                         {
-                            "source": src_val,
+                            "source": src_label,
                             "reason": str(exc),
                             "stage": "archive_processing",
                             "batch": idx,
                         }
                     )
                 finally:
-                    # If --r2-only and not keeping temp-dir, free disk space after each archive!
                     if args.r2_only and not args.temp_dir:
                         shutil.rmtree(batch_dir, ignore_errors=True)
                         logging.info(
-                            "Cleaned up temporary files for archive %d/%d",
+                            "Cleaned up temporary files for archive #%d",
                             idx,
-                            total_sources,
                         )
 
             if args.error_report and failures:
@@ -268,7 +305,7 @@ def main() -> None:
 
             logging.info(
                 "All %d archive(s) (%d files total) verified successfully in R2!",
-                total_sources,
+                processed_batches,
                 len(all_uploaded),
             )
 

@@ -4,5 +4,6 @@ google-api-python-client
 tqdm
 requests
 jsonschema
+playwright
 pytest
 pytest-mock
