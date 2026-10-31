@@ -89,7 +89,7 @@ class TestUploadAllToR2:
              patch("r2_client.upload_to_r2") as mock_upload:
             mock_bucket = MagicMock()
             mock_client.return_value = mock_bucket
-            mock_upload.side_effect = lambda bucket, f, key_prefix="": f"takeout/{f.name}"
+            mock_upload.side_effect = lambda bucket, f, key_prefix="", base_dir=None: f"takeout/{f.name}"
 
             result = upload_all_to_r2(cfg, files)
 

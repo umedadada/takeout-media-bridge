@@ -8,7 +8,7 @@ object existence.
 import logging
 import concurrent.futures
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import boto3
 from boto3.s3.transfer import TransferConfig
@@ -40,20 +40,44 @@ def get_r2_client(r2_cfg: dict):
 
 
 @retry(attempts=3, backoff=2)
-def upload_to_r2(bucket, file_path: Path, key_prefix: str = "") -> str:
+def upload_to_r2(
+    bucket,
+    file_path: Path,
+    key_prefix: str = "",
+    base_dir: Optional[Path] = None,
+) -> str:
     """Upload a single file to R2 and return the object key."""
-    key = f"{key_prefix}{file_path.name}" if not key_prefix.endswith('/') else f"{key_prefix}{file_path.name}"
+    if base_dir is not None:
+        try:
+            rel_path = file_path.relative_to(base_dir).as_posix()
+        except ValueError:
+            rel_path = file_path.name
+    else:
+        rel_path = file_path.name
+
+    prefix = key_prefix if not key_prefix or key_prefix.endswith("/") else f"{key_prefix}/"
+    key = f"{prefix}{rel_path}"
     logging.debug("Uploading %s to R2 as %s", file_path, key)
     bucket.upload_file(str(file_path), key, Config=_TRANSFER_CONFIG)
     return key
 
 
-def upload_all_to_r2(r2_cfg: dict, files: List[Path]) -> List[Tuple[Path, str]]:
+def upload_all_to_r2(
+    r2_cfg: dict,
+    files: List[Path],
+    base_dir: Optional[Path] = None,
+    key_prefix: str = "takeout/",
+) -> List[Tuple[Path, str]]:
     """Upload all files concurrently, returning a list of (local_path, r2_key)."""
     bucket = get_r2_client(r2_cfg)
     uploaded: List[Tuple[Path, str]] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-        future_to_path = {executor.submit(upload_to_r2, bucket, f, key_prefix="takeout/"): f for f in files}
+        future_to_path = {
+            executor.submit(
+                upload_to_r2, bucket, f, key_prefix=key_prefix, base_dir=base_dir
+            ): f
+            for f in files
+        }
         with tqdm(total=len(files), desc="Uploading to R2", unit="file") as pbar:
             for future in concurrent.futures.as_completed(future_to_path):
                 f = future_to_path[future]
@@ -81,10 +105,12 @@ def list_r2_keys(r2_cfg: dict, prefix: str = "takeout/") -> List[str]:
 
 
 @retry(attempts=3, backoff=2)
-def download_from_r2(bucket, key: str, dest_dir: Path) -> Path:
-    """Download a single object from R2 into *dest_dir* and return its local path."""
-    filename = Path(key).name
-    local_path = dest_dir / filename
+def download_from_r2(
+    bucket, key: str, dest_dir: Path, prefix: str = "takeout/"
+) -> Path:
+    """Download a single object from R2 into *dest_dir* preserving relative structure."""
+    rel_key = key[len(prefix) :] if prefix and key.startswith(prefix) else Path(key).name
+    local_path = dest_dir / rel_key
     local_path.parent.mkdir(parents=True, exist_ok=True)
     logging.debug("Downloading %s from R2 to %s", key, local_path)
     bucket.download_file(key, str(local_path), Config=_TRANSFER_CONFIG)
@@ -103,7 +129,8 @@ def download_all_from_r2(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         future_to_key = {
-            executor.submit(download_from_r2, bucket, k, dest_dir): k for k in keys
+            executor.submit(download_from_r2, bucket, k, dest_dir, prefix): k
+            for k in keys
         }
         with tqdm(total=len(keys), desc="Downloading from R2", unit="file") as pbar:
             for future in concurrent.futures.as_completed(future_to_key):
