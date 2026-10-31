@@ -351,6 +351,7 @@ def upload_to_amazon_photos(image_files: List[Path], token: str, endpoint: str =
         logging.error("Amazon Photos upload endpoint not configured.")
         return
 
+    @retry(attempts=3, backoff=2)
     def _upload_one(img_path: Path) -> bool:
         headers = {"Authorization": f"Bearer {token}"}
         try:
@@ -408,7 +409,8 @@ def upload_to_youtube(video_files: List[Path], youtube_cfg: dict):
             logging.info("Saved new YouTube credentials to %s", cred_path)
 
     youtube = build("youtube", "v3", credentials=creds)
-    for video_path in video_files:
+    @retry(attempts=3, backoff=2)
+    def _upload_one_video(video_path: Path):
         logging.info("Uploading %s to YouTube", video_path.name)
         request_body = {
             "snippet": {
@@ -420,18 +422,21 @@ def upload_to_youtube(video_files: List[Path], youtube_cfg: dict):
             "status": {"privacyStatus": "private"},
         }
         media = MediaFileUpload(str(video_path), chunksize=-1, resumable=True)
+        request = youtube.videos().insert(
+            part=",".join(request_body.keys()),
+            body=request_body,
+            media_body=media,
+        )
+        response = None
+        while response is None:
+            status, response = request.next_chunk()
+            if status:
+                logging.info("Upload %s: %.2f%%", video_path.name, status.progress * 100)
+        logging.info("Uploaded video %s, id=%s", video_path.name, response["id"])
+
+    for video_path in video_files:
         try:
-            request = youtube.videos().insert(
-                part=",".join(request_body.keys()),
-                body=request_body,
-                media_body=media,
-            )
-            response = None
-            while response is None:
-                status, response = request.next_chunk()
-                if status:
-                    logging.info("Upload %s: %.2f%%", video_path.name, status.progress * 100)
-            logging.info("Uploaded video %s, id=%s", video_path.name, response["id"])
+            _upload_one_video(video_path)
         except Exception as e:
             logging.error("Failed to upload %s to YouTube: %s", video_path, e)
 
