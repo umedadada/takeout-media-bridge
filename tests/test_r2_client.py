@@ -6,7 +6,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from r2_client import get_r2_client, upload_to_r2, upload_all_to_r2, object_exists
+from r2_client import get_r2_client, upload_to_r2, upload_all_to_r2, object_exists, _TRANSFER_CONFIG
 
 
 class TestGetR2Client:
@@ -46,7 +46,9 @@ class TestUploadToR2:
         key = upload_to_r2(mock_bucket, test_file, key_prefix="takeout/")
 
         assert key == "takeout/photo.jpg"
-        mock_bucket.upload_file.assert_called_once_with(str(test_file), "takeout/photo.jpg")
+        mock_bucket.upload_file.assert_called_once_with(
+            str(test_file), "takeout/photo.jpg", Config=_TRANSFER_CONFIG
+        )
 
     def test_retries_on_exception(self, tmp_path):
         test_file = tmp_path / "photo.jpg"

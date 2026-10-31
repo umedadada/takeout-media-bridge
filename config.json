@@ -10,6 +10,7 @@
     "credentials_file": "youtube_credentials.json"
   },
   "amazon_photos": {
-    "access_token": "<AMAZON_PHOTOS_OAUTH_TOKEN>"
+    "access_token": "<AMAZON_PHOTOS_OAUTH_TOKEN>",
+    "upload_endpoint": "https://photos.amazon.com/api/v1/uploads"
   }
 }
