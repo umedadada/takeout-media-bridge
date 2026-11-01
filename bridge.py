@@ -68,6 +68,7 @@ def _iter_archives(
             download_dir=browser_dl_dir,
             cdp_url=args.chrome_cdp,
             start_from=args.start_from,
+            end_at=args.end_at,
             google_password=google_password or None,
         ):
             idx += 1
@@ -111,6 +112,12 @@ def main() -> None:
         type=int,
         default=1,
         help="1-based archive index to resume from on the Takeout page (default: 1)",
+    )
+    parser.add_argument(
+        "--end-at",
+        type=int,
+        default=None,
+        help="Optional 1-based archive index to stop after on the Takeout page",
     )
     parser.add_argument(
         "--url",

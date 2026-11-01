@@ -99,6 +99,7 @@ def iter_takeout_page_downloads(
     cdp_url: Optional[str] = None,
     login_timeout_sec: int = 600,
     start_from: int = 1,
+    end_at: Optional[int] = None,
     google_password: Optional[str] = None,
 ) -> Iterator[Path]:
     """Open the Takeout archive page in Chrome and yield each downloaded archive file."""
@@ -180,6 +181,9 @@ def iter_takeout_page_downloads(
             if idx < start_from:
                 logging.info("Skipping archive %d/%d (before --start-from %d)", idx, len(hrefs), start_from)
                 continue
+            if end_at is not None and idx > end_at:
+                logging.info("Reached --end-at %d; stopping browser downloads.", end_at)
+                break
 
             max_attempts = 4
             for attempt in range(1, max_attempts + 1):
