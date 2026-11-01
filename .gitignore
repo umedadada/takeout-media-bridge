@@ -1,0 +1,33 @@
+# Credentials & Secrets (NEVER COMMIT)
+config.json
+client_secret*.json
+youtube_credentials.json
+*credentials*.json
+token*.json
+*.pickle
+*.pem
+*.key
+.env
+.env.*
+
+# Logs & Runtime Data
+logs/
+*.log
+chrome-profile/
+
+# Temporary Archives & Media Files
+*.zip
+*.tgz
+*.tar.gz
+*.mp4
+*.MOV
+*.mov
+
+# Python & OS
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.venv/
+venv/
+.DS_Store
