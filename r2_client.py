@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 import boto3
+from botocore.config import Config as BotocoreConfig
 from boto3.s3.transfer import TransferConfig
 from tqdm import tqdm
 
@@ -26,6 +27,10 @@ _TRANSFER_CONFIG = TransferConfig(
     use_threads=True,
 )
 
+_BOTO_CONFIG = BotocoreConfig(
+    max_pool_connections=64,
+)
+
 
 def get_r2_client(r2_cfg: dict):
     """Create a boto3 bucket resource from the R2 configuration dict."""
@@ -35,6 +40,7 @@ def get_r2_client(r2_cfg: dict):
         endpoint_url=r2_cfg["endpoint_url"],
         aws_access_key_id=r2_cfg["access_key_id"],
         aws_secret_access_key=r2_cfg["secret_access_key"],
+        config=_BOTO_CONFIG,
     )
     return s3.Bucket(r2_cfg["bucket"])
 
@@ -71,7 +77,7 @@ def upload_all_to_r2(
     """Upload all files concurrently, returning a list of (local_path, r2_key)."""
     bucket = get_r2_client(r2_cfg)
     uploaded: List[Tuple[Path, str]] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         future_to_path = {
             executor.submit(
                 upload_to_r2, bucket, f, key_prefix=key_prefix, base_dir=base_dir
@@ -127,7 +133,7 @@ def download_all_from_r2(
     if not keys:
         return downloaded
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
         future_to_key = {
             executor.submit(download_from_r2, bucket, k, dest_dir, prefix): k
             for k in keys

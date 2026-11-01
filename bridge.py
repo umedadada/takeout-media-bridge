@@ -57,15 +57,18 @@ def _iter_archives(
     urls: List[str],
     local_archives: List[Path],
     temp_root: Path,
+    google_password: str = "",
 ) -> Iterator[Tuple[int, str, Path, Path]]:
     """Yield (batch_index, source_label, batch_dir, archive_path) for each archive."""
-    idx = 0
+    idx = (args.start_from - 1) if args.takeout_page else 0
     if args.takeout_page:
         browser_dl_dir = temp_root / "browser_downloads"
         for dl_path in iter_takeout_page_downloads(
             page_url=args.takeout_page,
             download_dir=browser_dl_dir,
             cdp_url=args.chrome_cdp,
+            start_from=args.start_from,
+            google_password=google_password or None,
         ):
             idx += 1
             batch_dir = temp_root / f"batch_{idx:03d}"
@@ -102,6 +105,12 @@ def main() -> None:
         "--chrome-cdp",
         default=None,
         help="Optional Chrome DevTools Protocol URL (e.g. http://127.0.0.1:9222) to reuse an already-open Chrome",
+    )
+    parser.add_argument(
+        "--start-from",
+        type=int,
+        default=1,
+        help="1-based archive index to resume from on the Takeout page (default: 1)",
     )
     parser.add_argument(
         "--url",
@@ -212,7 +221,11 @@ def main() -> None:
             processed_batches = 0
 
             for idx, src_label, batch_dir, archive_path in _iter_archives(
-                args, urls, local_archives, temp_root
+                args,
+                urls,
+                local_archives,
+                temp_root,
+                google_password=config.get("google_password", ""),
             ):
                 processed_batches += 1
                 logging.info(

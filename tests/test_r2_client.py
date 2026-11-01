@@ -15,6 +15,7 @@ from r2_client import (
     download_all_from_r2,
     object_exists,
     _TRANSFER_CONFIG,
+    _BOTO_CONFIG,
 )
 
 
@@ -41,6 +42,7 @@ class TestGetR2Client:
                 endpoint_url=cfg["endpoint_url"],
                 aws_access_key_id=cfg["access_key_id"],
                 aws_secret_access_key=cfg["secret_access_key"],
+                config=_BOTO_CONFIG,
             )
             mock_s3.Bucket.assert_called_once_with("test-bucket")
             assert result == mock_bucket
